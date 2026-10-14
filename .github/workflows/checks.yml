@@ -1,0 +1,72 @@
+name: checks
+on: [push, pull_request, workflow_dispatch]
+permissions:
+  contents: read
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Scan Git history for secrets
+        run: |
+          curl -fsSL -o "$RUNNER_TEMP/gitleaks.tar.gz" https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/gitleaks_8.30.1_linux_x64.tar.gz
+          echo "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb  $RUNNER_TEMP/gitleaks.tar.gz" | sha256sum -c -
+          tar -xzf "$RUNNER_TEMP/gitleaks.tar.gz" -C "$RUNNER_TEMP" gitleaks
+          "$RUNNER_TEMP/gitleaks" git --redact --log-opts=--all
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.14'
+          cache: pip
+          cache-dependency-path: requirements.lock
+      - run: pip install -r requirements.lock
+      - run: pip install ruff==0.17.0 pip-audit==2.10.1
+      - run: ruff check backend xeon_runtime deploy tests --select F && ruff format --check backend xeon_runtime deploy tests
+      - run: pip-audit -r requirements.lock --disable-pip --no-deps
+      - run: python -m pytest -q
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm ci && npm run format:check && npm run build && npm run test:demo && npm audit --audit-level=high
+        working-directory: frontend
+      - run: bash -n install.sh deploy/setup.sh deploy/installer/entrypoint.sh deploy/bootstrap.sh deploy/dev-server.sh
+      # Shared runners hit Docker Hub's anonymous pull limit (429 Too Many Requests), so pull
+      # Docker Hub images through Google's public mirror. Applies to this CI job only.
+      - name: Use a Docker Hub mirror
+        run: |
+          cfg=/etc/docker/daemon.json
+          [ -s "$cfg" ] || echo '{}' | sudo tee "$cfg" >/dev/null
+          jq '. + {"registry-mirrors": ["https://mirror.gcr.io"]}' "$cfg" | sudo tee "$cfg.new" >/dev/null
+          sudo mv "$cfg.new" "$cfg"
+          sudo systemctl restart docker
+          docker info --format 'mirrors: {{.RegistryConfig.Mirrors}}'
+      - run: docker compose config -q && docker compose --profile runner --profile gpu config -q && docker compose build installer
+      - run: docker build -t quickstart-check .
+      - name: Verify fresh and existing container database startup
+        run: |
+          docker volume create quickstart-check-data
+          docker run --rm -u root -v quickstart-check-data:/app/data quickstart-check chown builder:builder /app/data
+          docker run --rm -v quickstart-check-data:/app/data quickstart-check python -c "from backend import store; store.initialize()"
+          docker run --rm -v quickstart-check-data:/app/data quickstart-check python -c "from backend import store; store.initialize()"
+      - name: Verify Docker sandbox and PostgreSQL tools
+        env:
+          QUICKSTART_TEST_DOCKER: "1"
+          SANDBOX_IMAGE: quickstart-check-sandbox
+        run: |
+          docker build -t quickstart-check-sandbox deploy/sandbox
+          docker run --rm quickstart-check-sandbox pip freeze > "$RUNNER_TEMP/sandbox-requirements.txt"
+          pip-audit -r "$RUNNER_TEMP/sandbox-requirements.txt" --disable-pip --no-deps
+          pg_password=$(openssl rand -hex 24)
+          echo "::add-mask::$pg_password"
+          export POSTGRES_PASSWORD="$pg_password"
+          docker run -d --name quickstart-check-pg -e POSTGRES_PASSWORD -p 127.0.0.1:55432:5432 pgvector/pgvector:pg17
+          trap 'docker rm -f quickstart-check-pg >/dev/null' EXIT
+          for attempt in $(seq 1 30); do
+            docker exec quickstart-check-pg pg_isready -U postgres && break
+            sleep 2
+          done
+          export QUICKSTART_TEST_PG="postgresql://postgres:$pg_password@127.0.0.1:55432/postgres"
+          python -m pytest -q tests/test_enterprise_tools.py

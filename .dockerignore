@@ -1,0 +1,14 @@
+**/.git
+**/.env
+**/.env.*
+**/node_modules
+**/.venv
+**/dist
+**/__pycache__
+**/.pytest_cache
+**/*.tsbuildinfo
+data
+tests
+docs
+toolkit
+deploy/gpu

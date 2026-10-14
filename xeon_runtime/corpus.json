@@ -1,0 +1,8 @@
+{
+  "documents": [
+    {"id":"brief-001","title":"Sample service operations update","text":"DEMO FIXTURE, not Dell measurements. The support team closed 84 tickets yesterday, including 12 escalations. Open backlog fell from 46 to 38 tickets. Two firmware cases need engineering follow-up. The next maintenance window is Sunday at 02:00 UTC."},
+    {"id":"brief-002","title":"Sample deployment update","text":"DEMO FIXTURE, not Dell measurements. Three agent deployments passed functional acceptance. The research workflow needs an additional source review. A model endpoint change is proposed for staging; no production endpoint change has been approved."},
+    {"id":"brief-003","title":"Briefing writing guide","text":"Daily briefings should include an executive summary, operational changes, risks, and next actions. Cite source identifiers. Distinguish measured results from synthetic examples. Never claim that sample data demonstrates hardware capacity."}
+  ],
+  "metrics": {"tickets_closed":84,"backlog_previous":46,"backlog_current":38,"escalations":12,"deployments_accepted":3}
+}

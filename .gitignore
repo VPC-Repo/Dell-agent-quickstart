@@ -1,0 +1,20 @@
+# Local settings and generated state
+.env
+.env.*
+!.env.example
+data/
+toolkit/
+deploy/gpu/compose.yaml
+*.local.md
+
+# Build and tool output
+.venv/
+__pycache__/
+*.pyc
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+node_modules/
+dist/
+*.tsbuildinfo
+.DS_Store

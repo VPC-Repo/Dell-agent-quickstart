@@ -1,0 +1,176 @@
+# One command installs and starts everything:  docker compose up
+#
+# `installer` is the only service started by default. It runs deploy/setup.sh against the host's Docker: it
+# deploys the Intel enterprise agent toolkit (LiteLLM, PostgreSQL + pgvector, Redis, Langfuse, vLLM on CPU),
+# starts vLLM CUDA engines on free GPUs, writes .env and data/placement.json, then starts the runner services
+# below (profile `runner`, plus `gpu` on GPU hosts) and installs the eight agents. Run it from the repository
+# directory: the repository is mounted at the same path inside the installer so the toolkit's relative bind
+# mounts resolve on the host.
+#
+# The runner: API + UI, worker, its own PostgreSQL, power and GPU telemetry sidecars. It joins the toolkit's
+# Docker network so it reaches LiteLLM, PostgreSQL + pgvector, Redis and the vLLM engines by name.
+name: dell-agent-quickstart
+services:
+  installer:
+    build: deploy/installer
+    image: dell-agent-quickstart-installer:local
+    network_mode: host
+    environment:
+      REPO_DIR: ${PWD}
+      USE_GPU: ${USE_GPU:-auto}
+      MIN_GPU_GB: ${MIN_GPU_GB:-80}
+      HF_TOKEN: ${HF_TOKEN:-}
+      WAIT_MODELS_MINUTES: ${WAIT_MODELS_MINUTES:-90}
+      HOST_NAME: ${HOSTNAME:-}
+      HOST_USER: ${USER:-}
+      http_proxy: ${http_proxy:-}
+      https_proxy: ${https_proxy:-}
+      no_proxy: ${no_proxy:-}
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ${PWD}:${PWD}
+    working_dir: ${PWD}
+  # Named runner-db, not postgres: the api and worker also sit on the toolkit's
+  # network, where `postgres` is the toolkit's own PostgreSQL.
+  runner-db:
+    profiles: [runner]
+    oom_score_adj: -700
+    image: postgres:17-bookworm
+    environment:
+      POSTGRES_DB: builder
+      POSTGRES_USER: builder
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-}
+    volumes:
+      - postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: [CMD-SHELL, "pg_isready -U builder -d builder"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    restart: unless-stopped
+  api:
+    profiles: [runner]
+    oom_score_adj: -700
+    build: .
+    image: dell-agent-quickstart:local
+    env_file:
+      - path: .env
+        required: false
+    # The docker group lets the runner read container stats and start sandbox
+    # containers over the socket; DOCKER_GID is written to .env by deploy/setup.sh.
+    group_add: ["${DOCKER_GID:-999}"]
+    volumes: &app-volumes
+      - fixtures:/data/fixtures
+      - artifacts:/data/artifacts
+      - telemetry:/data/telemetry
+      - ./data/placement.json:/data/placement.json:ro
+      - ${DOCKER_SOCKET:-/var/run/docker.sock}:/var/run/docker.sock
+    extra_hosts: ["host.docker.internal:host-gateway"]
+    environment: &app-environment
+      DATABASE_URL: postgresql+psycopg://builder:${POSTGRES_PASSWORD:-}@runner-db:5432/builder
+      CHECKPOINT_URL: postgresql://builder:${POSTGRES_PASSWORD:-}@runner-db:5432/builder
+      BUILDER_API_TOKEN: ${BUILDER_API_TOKEN:-}
+      # No token by default: the listener stays on loopback. Set BUILDER_AUTH=token
+      # in .env to require BUILDER_API_TOKEN (needed before binding beyond loopback).
+      BUILDER_AUTH: ${BUILDER_AUTH:-off}
+      EMBEDDED_WORKER: "0"
+      LANGSMITH_TRACING: "false"
+      FIXTURE_DIR: /data/fixtures
+      ARTIFACT_DIR: /data/artifacts
+      PLACEMENT_REGISTRY: /data/placement.json
+      GPU_TELEMETRY_FILE: /data/telemetry/gpu.csv
+      POWER_TELEMETRY_FILE: /data/telemetry/power.csv
+      DOCKER_SOCKET: /var/run/docker.sock
+      SANDBOX_IMAGE: ${SANDBOX_IMAGE:-dell-agent-quickstart-sandbox:local}
+      # Agent-written code runs only in sandbox containers; a failed sandbox is an error, never a local process.
+      SANDBOX_MODE: ${SANDBOX_MODE:-docker}
+      HOST_NAME: ${HOST_NAME:-}
+      WORKER_CONCURRENCY: ${WORKER_CONCURRENCY:-3}
+      # The toolkit's services; empty values select the local fallbacks.
+      GATEWAY_URL: ${GATEWAY_URL:-http://agentic-litellm:4000/v1}
+      # The runner's own gateway key: it can call models but not change the gateway.
+      GATEWAY_KEY: ${GATEWAY_KEY:-}
+      WAREHOUSE_URL: ${WAREHOUSE_URL:-}
+      REDIS_URL: ${REDIS_URL:-}
+    ports:
+      - "${BUILDER_BIND:-127.0.0.1}:${BUILDER_PORT:-8766}:8000"
+    depends_on:
+      runner-db:
+        condition: service_healthy
+    healthcheck:
+      test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health')"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    restart: unless-stopped
+    networks: [default, agentic]
+  worker:
+    profiles: [runner]
+    image: dell-agent-quickstart:local
+    pull_policy: never
+    command: [python, -m, backend.worker]
+    env_file:
+      - path: .env
+        required: false
+    group_add: ["${DOCKER_GID:-999}"]
+    volumes: *app-volumes
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    environment: *app-environment
+    depends_on:
+      api:
+        condition: service_healthy
+    restart: unless-stopped
+    networks: [default, agentic]
+  # GPU load for the system panel: nvidia-smi inside a CUDA base image writes a
+  # CSV every 0.5 s that the API and worker read. Started only with `--profile gpu`.
+  # CPU package power from Intel RAPL. The counters are root-only on the host, so this
+  # sidecar runs as root and publishes watts to the shared telemetry volume for the
+  # unprivileged api and worker to read. Harmless where RAPL is absent (it idles).
+  power-telemetry:
+    profiles: [runner]
+    image: dell-agent-quickstart:local
+    build: .  # same image as api/worker; without this compose tries to pull it before the build
+    user: "0:0"
+    command: ["python", "-m", "backend.power_sidecar", "/out/power.csv"]
+    volumes:
+      - telemetry:/out
+      # The container's own sysfs hides the host's powercap tree, so it is mounted at a neutral path.
+      - /sys/devices/virtual/powercap:/host/powercap:ro
+    restart: unless-stopped
+  gpu-telemetry:
+    image: nvidia/cuda:12.6.3-base-ubuntu24.04
+    profiles: [gpu]
+    command:
+      - bash
+      - -c
+      - |
+        # If nvidia-smi fails (for example after the host reloads the NVIDIA driver, which breaks this
+        # container's NVML handle), exit so Docker restarts the container and it attaches to the driver again.
+        while true; do
+          nvidia-smi --query-gpu=index,name,utilization.gpu,memory.used,memory.total,power.draw,temperature.gpu \
+            --format=csv,noheader,nounits > /out/gpu.csv.tmp || { rm -f /out/gpu.csv; exit 1; }
+          mv /out/gpu.csv.tmp /out/gpu.csv
+          sleep 0.5
+        done
+    volumes:
+      - telemetry:/out
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu, utility]
+    restart: unless-stopped
+volumes:
+  fixtures:
+  artifacts:
+  telemetry:
+  postgres:
+networks:
+  default:
+  # The toolkit's network, created by the toolkit deployment that deploy/setup.sh runs.
+  agentic:
+    external: true
+    name: ${TOOLKIT_NETWORK:-docker_agentic-net}
