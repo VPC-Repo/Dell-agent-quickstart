@@ -1,0 +1,21 @@
+Dell Agent Quickstart
+Copyright (c) 2026 Vector Path Consulting
+
+The source code in this repository is licensed under the MIT License (see LICENSE). The following are not
+covered by that license.
+
+Trademarks, logos and product images
+  Dell, Dell Technologies and PowerEdge are trademarks of Dell Inc. or its subsidiaries. Intel, the Intel logo
+  and Xeon are trademarks of Intel Corporation or its subsidiaries. NVIDIA and RTX are trademarks of NVIDIA
+  Corporation. Other names may be trademarks of their respective owners.
+  The logos (frontend/src/assets/dell-technologies-blue.svg, frontend/src/assets/intel-logo-energy-blue.png)
+  and the server images (frontend/src/assets/server-cpu.png, frontend/src/assets/server-gpu.png) are used with
+  permission. They are not licensed for reuse outside this project.
+
+Fonts
+  frontend/src/assets/fonts/Roboto-*.woff2: Copyright 2011 The Roboto Project Authors, licensed under the
+  SIL Open Font License, Version 1.1 (frontend/src/assets/fonts/OFL.txt).
+
+Software and models the installer downloads
+  The Intel AI for Enterprise Agent Toolkit, vLLM, LiteLLM, PostgreSQL, Redis, Langfuse, the container images
+  and the models are not part of this repository. Each is used under its own license.
